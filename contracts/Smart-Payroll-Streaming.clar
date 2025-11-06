@@ -11,6 +11,8 @@
 (define-constant err-stream-active (err u107))
 (define-constant err-invalid-duration (err u108))
 (define-constant err-nothing-to-withdraw (err u109))
+(define-constant err-stream-paused (err u110))
+(define-constant err-stream-not-paused (err u111))
 
 (define-map streams
   { stream-id: uint }
@@ -22,7 +24,10 @@
     start-block: uint,
     end-block: uint,
     withdrawn: uint,
-    active: bool
+    active: bool,
+    paused: bool,
+    paused-at-block: uint,
+    total-paused-blocks: uint
   }
 )
 
@@ -54,11 +59,14 @@
   (let (
     (stream (unwrap! (get-stream stream-id) err-not-found))
     (current-block stacks-block-height)
-    (elapsed-blocks (if (<= current-block (get start-block stream))
+    (effective-current-block (if (get paused stream)
+                                 (get paused-at-block stream)
+                                 current-block))
+    (elapsed-blocks (if (<= effective-current-block (get start-block stream))
                         u0
-                        (if (>= current-block (get end-block stream))
-                            (- (get end-block stream) (get start-block stream))
-                            (- current-block (get start-block stream)))))
+                        (if (>= effective-current-block (get end-block stream))
+                            (- (get end-block stream) (get start-block stream) (get total-paused-blocks stream))
+                            (- effective-current-block (get start-block stream) (get total-paused-blocks stream)))))
     (total-earned (* elapsed-blocks (get rate-per-block stream)))
     (available (- total-earned (get withdrawn stream)))
   )
@@ -80,7 +88,10 @@
       end-block: (get end-block stream),
       withdrawn: (get withdrawn stream),
       available: earned,
-      active: (get active stream)
+      active: (get active stream),
+      paused: (get paused stream),
+      paused-at-block: (get paused-at-block stream),
+      total-paused-blocks: (get total-paused-blocks stream)
     })
   )
 )
@@ -112,7 +123,10 @@
         start-block: start-block,
         end-block: end-block,
         withdrawn: u0,
-        active: true
+        active: true,
+        paused: false,
+        paused-at-block: u0,
+        total-paused-blocks: u0
       }
     )
     
@@ -142,6 +156,7 @@
   )
     (asserts! (is-eq tx-sender (get employee stream)) err-unauthorized)
     (asserts! (get active stream) err-stream-ended)
+    (asserts! (not (get paused stream)) err-stream-paused)
     (asserts! (> available u0) err-nothing-to-withdraw)
     
     (try! (as-contract (stx-transfer? available tx-sender (get employee stream))))
@@ -202,4 +217,49 @@
 
 (define-read-only (get-total-streams)
   (ok (var-get stream-nonce))
+)
+
+(define-public (pause-stream (stream-id uint))
+  (let (
+    (stream (unwrap! (get-stream stream-id) err-not-found))
+    (current-block stacks-block-height)
+  )
+    (asserts! (is-eq tx-sender (get employer stream)) err-unauthorized)
+    (asserts! (get active stream) err-stream-ended)
+    (asserts! (not (get paused stream)) err-stream-active)
+    
+    (map-set streams
+      { stream-id: stream-id }
+      (merge stream {
+        paused: true,
+        paused-at-block: current-block
+      })
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (resume-stream (stream-id uint))
+  (let (
+    (stream (unwrap! (get-stream stream-id) err-not-found))
+    (current-block stacks-block-height)
+    (paused-duration (- current-block (get paused-at-block stream)))
+    (new-total-paused (+ (get total-paused-blocks stream) paused-duration))
+  )
+    (asserts! (is-eq tx-sender (get employer stream)) err-unauthorized)
+    (asserts! (get active stream) err-stream-ended)
+    (asserts! (get paused stream) err-stream-not-paused)
+    
+    (map-set streams
+      { stream-id: stream-id }
+      (merge stream {
+        paused: false,
+        paused-at-block: u0,
+        total-paused-blocks: new-total-paused
+      })
+    )
+    
+    (ok true)
+  )
 )
